@@ -54,7 +54,6 @@ indicadores_secundaria = {
 
 # --- FUNCIONES AUXILIARES ---
 def formato_europeo(valor):
-    """Convierte un float a formato europeo de miles y decimales (ej: 4.003,20)"""
     if pd.isna(valor): return "0,00"
     return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -80,7 +79,6 @@ def obtener_datos_simples(indicator_id, nombre_indicador, start_date, end_date):
         if 'indicator' in data and 'values' in data['indicator']:
             df = pd.DataFrame(data['indicator']['values'])
             if not df.empty and 'geo_id' in df.columns:
-                # Actualizado para que Mercado Diario (600) y los IDA (612, 613, 614) usen la geo 3
                 geo_filtro = 3 if str(indicator_id) in ["600", "612", "613", "614"] else 8741
                 df = df[df['geo_id'] == geo_filtro]
             if not df.empty:
@@ -140,7 +138,6 @@ def generar_perfil(df):
     df_local['Hora'] = df_local['datetime'].dt.hour
     return df_local.groupby(['Hora', 'Indicador'])['value'].mean().reset_index()
 
-
 # ==============================================================================
 # PÁGINA 1: MERCADOS DE AJUSTE
 # ==============================================================================
@@ -169,13 +166,11 @@ def pagina_ajustes(start_date, end_date):
         dfs_secundaria = [obtener_datos_simples(i, n, start_date, end_date) for i, n in indicadores_secundaria.items()]
         dfs_secundaria = [df for df in dfs_secundaria if not df.empty]
         
-        # --- TABLA EXACTA DE BENEFICIO DIARIO ---
         if dfs_precios and dfs_energia:
             try:
                 df_p_raw = pd.concat(dfs_precios, ignore_index=True)
                 df_e_raw = pd.concat(dfs_energia, ignore_index=True)
                 
-                # Agrupamos primero a nivel horario para hacer el cruce exacto hora a hora
                 df_p_h = df_p_raw[df_p_raw['Indicador'].isin(["Precio mercado diario España", "Precio restricciones técnicas fase 2"])].groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].mean().reset_index()
                 df_e_h = df_e_raw[df_e_raw['Indicador'] == "Energía casada RT fase 2 a bajar"].groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].sum().reset_index()
                 
@@ -187,19 +182,11 @@ def pagina_ajustes(start_date, end_date):
                 ind_e = "Energía casada RT fase 2 a bajar"
                 
                 if ind_d in df_p_pivot_exacto.columns and ind_rt in df_p_pivot_exacto.columns and ind_e in df_e_pivot_exacto.columns:
-                    # Cálculo físico hora a hora
                     beneficio_horario = (df_p_pivot_exacto[ind_d] - df_p_pivot_exacto[ind_rt]) * df_e_pivot_exacto[ind_e]
-                    
-                    # Agregación estricta diaria para la tabla
                     beneficio_diario = beneficio_horario.resample('D').sum()
-                    
                     df_beneficio = pd.DataFrame({'Beneficio': beneficio_diario})
                     df_beneficio.index = df_beneficio.index.strftime('%Y-%m-%d')
-                    
-                    # Aplicamos formato europeo "4.003,20"
                     df_beneficio['Beneficio'] = df_beneficio['Beneficio'].apply(formato_europeo)
-                    
-                    # Transponemos para que sea una sola fila
                     df_beneficio_row = df_beneficio.T
                     df_beneficio_row.index = ["Potencial beneficio RT fase 2 a bajar (€)"]
                     
@@ -207,9 +194,8 @@ def pagina_ajustes(start_date, end_date):
                     st.dataframe(df_beneficio_row, use_container_width=True)
                     st.markdown("---")
             except Exception:
-                pass # Si hay algún error en el cruce de fechas, saltamos la tabla
+                pass 
 
-        # --- PROCESAMIENTO PARA LOS GRÁFICOS (Según UI seleccionada) ---
         lista_dfs_agrupados = []
         df_final_precios = None
         df_final_energia = None
@@ -242,16 +228,13 @@ def pagina_ajustes(start_date, end_date):
                 df_final_secundaria = agrupar_datos(df_final_secundaria, freq, 'precio')
             lista_dfs_agrupados.append(df_final_secundaria)
 
-        # Cálculo de Spread interactivo solo para pintar en el gráfico 2
         spread_grafico = None
         df_pivot_precios = pd.DataFrame()
-        
         if df_final_precios is not None and df_final_energia is not None:
             df_pivot_precios = df_final_precios.pivot_table(index=x_col, columns='Indicador', values='value', aggfunc='first')
             if "Precio mercado diario España" in df_pivot_precios.columns and "Precio restricciones técnicas fase 2" in df_pivot_precios.columns:
                 spread_grafico = df_pivot_precios["Precio mercado diario España"] - df_pivot_precios["Precio restricciones técnicas fase 2"]
 
-        # --- GRÁFICO 1: PRECIOS ---
         if df_final_precios is not None:
             fig_precios = px.line(df_final_precios, x=x_col, y='value', color='Indicador', title='Evolución de Precios (€/MWh)', template='plotly_white', markers=True if perfil_24h or (freq and freq != 'h') else False)
             fig_precios.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
@@ -261,7 +244,6 @@ def pagina_ajustes(start_date, end_date):
             
         st.markdown("---")
 
-        # --- GRÁFICO 2: ENERGÍA (Y SPREAD) ---
         if df_final_energia is not None:
             fig_energia = make_subplots(specs=[[{"secondary_y": True}]])
             colores = px.colors.qualitative.Plotly
@@ -281,7 +263,6 @@ def pagina_ajustes(start_date, end_date):
 
         st.markdown("---")
         
-        # --- GRÁFICO 3: SECUNDARIA ---
         if df_final_secundaria is not None:
             fig_secundaria = make_subplots(specs=[[{"secondary_y": True}]])
             for indicador in df_final_secundaria['Indicador'].unique():
@@ -293,7 +274,6 @@ def pagina_ajustes(start_date, end_date):
             fig_secundaria.update_yaxes(title_text="Precio Banda (€/MW)", secondary_y=True, showgrid=False)
             if perfil_24h: fig_secundaria.update_xaxes(tickmode='linear', dtick=1)
             st.plotly_chart(fig_secundaria, use_container_width=True)
-
 
 # ==============================================================================
 # PÁGINA 2: PRECIOS DE CAPTURA RENOVABLES
@@ -340,7 +320,6 @@ def pagina_renovables(start_date, end_date):
             fig.update_yaxes(title_text="Generación Peninsular (MWh)", secondary_y=True, showgrid=False)
             st.plotly_chart(fig, use_container_width=True)
 
-
 # ==============================================================================
 # PÁGINA 3: PRODUCCIÓN VS ESTIMACIÓN
 # ==============================================================================
@@ -377,7 +356,7 @@ def pagina_estimaciones(start_date, end_date):
             st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# PÁGINA 4: MERCADOS INTRADIARIOS (NUEVA)
+# PÁGINA 4: MERCADOS INTRADIARIOS
 # ==============================================================================
 def pagina_intradiarios(start_date, end_date):
     st.subheader("⏱️ Mercados Intradiarios y Referencia MIC")
@@ -391,6 +370,19 @@ def pagina_intradiarios(start_date, end_date):
         "1727": "Precio referencia MIC"
     }
 
+    # Definición de la paleta de colores coordinada para ambos gráficos
+    mapa_colores = {
+        "Precio mercado diario España": "black",
+        "Precio IDA 1": "#1f77b4",            # Azul Plotly
+        "Spread (Diario - IDA 1)": "#1f77b4", # Mismo azul
+        "Precio IDA 2": "#ff7f0e",            # Naranja Plotly
+        "Spread (Diario - IDA 2)": "#ff7f0e", # Mismo naranja
+        "Precio IDA 3": "#2ca02c",            # Verde Plotly
+        "Spread (Diario - IDA 3)": "#2ca02c", # Mismo verde
+        "Precio referencia MIC": "#d62728",   # Rojo Plotly
+        "Spread (Diario - MIC)": "#d62728"    # Mismo rojo
+    }
+
     with st.spinner("Descargando y cruzando datos intradiarios..."):
         dfs = [obtener_datos_simples(i, n, start_date, end_date) for i, n in indicadores_ida.items()]
         dfs = [df for df in dfs if not df.empty]
@@ -401,12 +393,28 @@ def pagina_intradiarios(start_date, end_date):
             
         df_final = pd.concat(dfs, ignore_index=True)
 
+        # Pivoteamos creando un índice horario continuo (si faltan horas, se rellenarán con NaN explícitamente)
+        df_h = df_final.groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].mean().reset_index()
+        df_pivot = df_h.pivot_table(index='datetime', columns='Indicador', values='value')
+        
+        if not df_pivot.empty:
+            # Forzamos un rango temporal sin interrupciones
+            idx_completo = pd.date_range(start=df_pivot.index.min(), end=df_pivot.index.max(), freq='H')
+            df_pivot = df_pivot.reindex(idx_completo)
+            
+        # Reconstruimos la tabla para el gráfico superior
+        df_plot_top = df_pivot.reset_index().rename(columns={'index': 'datetime'}).melt(id_vars='datetime', var_name='Indicador', value_name='value')
+
         # --- GRÁFICO 1: EVOLUCIÓN DE PRECIOS ---
         fig_precios = px.line(
-            df_final, x='datetime', y='value', color='Indicador',
+            df_plot_top, x='datetime', y='value', color='Indicador',
             title='Evolución de Precios: Diario vs Intradiarios (€/MWh)',
+            color_discrete_map=mapa_colores,
             template='plotly_white'
         )
+        
+        # update_traces evita que Plotly conecte valores cruzando huecos nulos (NaN)
+        fig_precios.update_traces(connectgaps=False) 
         fig_precios.update_xaxes(title_text='Fecha y Hora')
         fig_precios.update_yaxes(title_text='Precio (€/MWh)')
         st.plotly_chart(fig_precios, use_container_width=True)
@@ -414,10 +422,6 @@ def pagina_intradiarios(start_date, end_date):
         st.markdown("---")
 
         # --- GRÁFICO 2: SPREADS (DIFERENCIAS) ---
-        # Pivotamos los datos para poder restarlos limpiamente
-        df_h = df_final.groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].mean().reset_index()
-        df_pivot = df_h.pivot_table(index='datetime', columns='Indicador', values='value')
-        
         diario = "Precio mercado diario España"
         spreads = pd.DataFrame(index=df_pivot.index)
         
@@ -427,17 +431,23 @@ def pagina_intradiarios(start_date, end_date):
             if "Precio IDA 3" in df_pivot.columns: spreads['Spread (Diario - IDA 3)'] = df_pivot[diario] - df_pivot["Precio IDA 3"]
             if "Precio referencia MIC" in df_pivot.columns: spreads['Spread (Diario - MIC)'] = df_pivot[diario] - df_pivot["Precio referencia MIC"]
             
+            # Limpiamos columnas que no hayan podido calcularse por completo
+            spreads = spreads.dropna(how='all', axis=1)
+            
             if not spreads.empty:
-                # Transformar para usar en px.line
-                spreads_reset = spreads.reset_index().melt(id_vars='datetime', var_name='Indicador', value_name='Spread')
+                spreads_reset = spreads.reset_index().rename(columns={'index': 'datetime'}).melt(id_vars='datetime', var_name='Indicador', value_name='Spread')
                 
                 fig_spreads = px.line(
                     spreads_reset, x='datetime', y='Spread', color='Indicador',
                     title='Spreads: Mercado Diario vs Mercados Intradiarios (€/MWh)',
+                    color_discrete_map=mapa_colores,
                     template='plotly_white'
                 )
                 
-                # Añadir una línea en Y=0 para ver claramente cuándo el diario es más caro (arriba) o más barato (abajo)
+                # Igualmente, evitamos conectar huecos con rectas
+                fig_spreads.update_traces(connectgaps=False)
+                
+                # Línea en Y=0 para marcar claramente quién está por encima de quién
                 fig_spreads.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
                 fig_spreads.update_xaxes(title_text='Fecha y Hora')
                 fig_spreads.update_yaxes(title_text='Diferencia de Precio (€/MWh)')
