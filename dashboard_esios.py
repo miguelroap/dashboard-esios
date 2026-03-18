@@ -161,9 +161,12 @@ def pagina_ajustes(start_date, end_date):
         dfs_secundaria = [obtener_datos_simples(i, n, start_date, end_date) for i, n in indicadores_secundaria.items()]
         dfs_secundaria = [df for df in dfs_secundaria if not df.empty]
         
+        # PROCESAMIENTO Y AGRUPACIÓN
         lista_dfs_agrupados = []
+        df_final_precios = None
+        df_final_energia = None
+        df_final_secundaria = None
 
-        # --- GRÁFICO 1: PRECIOS ---
         if dfs_precios:
             df_final_precios = pd.concat(dfs_precios, ignore_index=True)
             if perfil_24h:
@@ -171,17 +174,91 @@ def pagina_ajustes(start_date, end_date):
                 df_final_precios = generar_perfil(df_final_precios)
             else:
                 df_final_precios = agrupar_datos(df_final_precios, freq, 'precio')
-                
             lista_dfs_agrupados.append(df_final_precios)
+
+        if dfs_energia:
+            df_final_energia = pd.concat(dfs_energia, ignore_index=True)
+            if perfil_24h:
+                df_final_energia = agrupar_datos(df_final_energia, 'h', 'energia')
+                df_final_energia = generar_perfil(df_final_energia)
+            else:
+                df_final_energia = agrupar_datos(df_final_energia, freq, 'energia')
+            lista_dfs_agrupados.append(df_final_energia)
+
+        if dfs_secundaria:
+            df_final_secundaria = pd.concat(dfs_secundaria, ignore_index=True)
+            if perfil_24h:
+                df_final_secundaria = agrupar_datos(df_final_secundaria, 'h', 'precio')
+                df_final_secundaria = generar_perfil(df_final_secundaria)
+            else:
+                df_final_secundaria = agrupar_datos(df_final_secundaria, freq, 'precio')
+            lista_dfs_agrupados.append(df_final_secundaria)
+
+        # --- CÁLCULOS MATEMÁTICOS DE SPREAD Y BENEFICIO ---
+        spread = None
+        beneficio = None
+        df_pivot_precios = pd.DataFrame()
+        
+        if df_final_precios is not None and df_final_energia is not None:
+            # Pivotar los dataframes para tener los indicadores como columnas y alinear los periodos temporales
+            df_pivot_precios = df_final_precios.pivot_table(index=x_col, columns='Indicador', values='value', aggfunc='first')
+            df_pivot_energia = df_final_energia.pivot_table(index=x_col, columns='Indicador', values='value', aggfunc='first')
             
-            # Crear figura con doble eje Y
-            fig_precios = make_subplots(specs=[[{"secondary_y": True}]])
+            ind_diario = "Precio mercado diario España"
+            ind_rt2 = "Precio restricciones técnicas fase 2"
+            ind_e_rt2_baj = "Energía casada RT fase 2 a bajar"
+            
+            # Calcular spread si existen los indicadores
+            if ind_diario in df_pivot_precios.columns and ind_rt2 in df_pivot_precios.columns:
+                spread = df_pivot_precios[ind_diario] - df_pivot_precios[ind_rt2]
+                
+                # Calcular beneficio si existe la energía
+                if ind_e_rt2_baj in df_pivot_energia.columns:
+                    beneficio = spread * df_pivot_energia[ind_e_rt2_baj]
+
+        # --- NUEVO: TABLA DE POTENCIAL BENEFICIO AL PRINCIPIO ---
+        if beneficio is not None:
+            st.markdown("### 💰 Potencial Beneficio RT Fase 2 a Bajar")
+            st.markdown("Cálculo: *(Precio Mercado Diario - Precio RT Fase 2)* x *Energía Casada RT Fase 2 a bajar*")
+            
+            # Crear dataframe para la tabla
+            df_beneficio = pd.DataFrame({x_col: df_pivot_precios.index, 'Beneficio': beneficio.values})
+            
+            if not perfil_24h:
+                df_beneficio[x_col] = df_beneficio[x_col].dt.strftime('%Y-%m-%d %H:%M')
+                
+            # Transponer para que sea una sola fila con los periodos en las columnas
+            df_beneficio_row = df_beneficio.set_index(x_col).T
+            df_beneficio_row.index = ["Potencial beneficio RT fase 2 a bajar (€)"]
+            
+            # Mostrar la tabla redondeada a 2 decimales para que se vea bonita
+            st.dataframe(df_beneficio_row.fillna(0).round(2), use_container_width=True)
+            st.markdown("---")
+
+        # --- GRÁFICO 1: PRECIOS (Restaurado a la normalidad sin el spread) ---
+        if df_final_precios is not None:
+            fig_precios = px.line(
+                df_final_precios, x=x_col, y='value', color='Indicador', 
+                title='Evolución de Precios (€/MWh)', 
+                template='plotly_white',
+                markers=True if perfil_24h or (freq and freq != 'h') else False
+            )
+            fig_precios.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
+            fig_precios.update_yaxes(title_text='Precio (€/MWh)')
+            if perfil_24h: fig_precios.update_xaxes(tickmode='linear', dtick=1)
+            st.plotly_chart(fig_precios, use_container_width=True)
+            
+        st.markdown("---")
+
+        # --- GRÁFICO 2: ENERGÍA (Y SPREAD EN EJE SECUNDARIO) ---
+        if df_final_energia is not None:
+            fig_energia = make_subplots(specs=[[{"secondary_y": True}]])
             colores = px.colors.qualitative.Plotly
             
-            # Añadir las líneas de los indicadores normales al eje primario
-            for i, indicador in enumerate(df_final_precios['Indicador'].unique()):
-                df_filtro = df_final_precios[df_final_precios['Indicador'] == indicador]
-                fig_precios.add_trace(
+            # 1. Añadimos las líneas de energía al eje primario (Izquierda)
+            for i, indicador in enumerate(df_final_energia['Indicador'].unique()):
+                df_filtro = df_final_energia[df_final_energia['Indicador'] == indicador]
+                fig_energia.add_trace(
                     go.Scatter(
                         x=df_filtro[x_col], 
                         y=df_filtro['value'], 
@@ -192,65 +269,31 @@ def pagina_ajustes(start_date, end_date):
                     secondary_y=False
                 )
             
-            # Calcular la diferencia (Spread) Diario vs RT Fase 2
-            df_pivot_dif = df_final_precios.pivot_table(index=x_col, columns='Indicador', values='value', aggfunc='first').reset_index()
-            ind_diario = "Precio mercado diario España"
-            ind_rt2 = "Precio restricciones técnicas fase 2"
-            
-            if ind_diario in df_pivot_dif.columns and ind_rt2 in df_pivot_dif.columns:
-                df_pivot_dif['Diferencia (Diario - RT2)'] = df_pivot_dif[ind_diario] - df_pivot_dif[ind_rt2]
-                
-                # Añadir la línea de diferencia al eje secundario
-                fig_precios.add_trace(
+            # 2. Añadimos la línea del SPREAD al eje secundario (Derecha)
+            if spread is not None:
+                fig_energia.add_trace(
                     go.Scatter(
-                        x=df_pivot_dif[x_col],
-                        y=df_pivot_dif['Diferencia (Diario - RT2)'],
-                        name='Diferencia (Diario - RT2)',
+                        x=df_pivot_precios.index,
+                        y=spread.values,
+                        name='Diferencia de Precio (Diario - RT2)',
                         mode='lines+markers' if perfil_24h or (freq and freq != 'h') else 'lines',
-                        line=dict(color='rgba(150, 150, 150, 0.6)', dash='dash') # Línea discontinua y clara
+                        line=dict(color='rgba(150, 150, 150, 0.6)', dash='dash')
                     ),
                     secondary_y=True
                 )
-
-            # Actualizar diseño del gráfico
-            fig_precios.update_layout(title_text='Evolución de Precios (€/MWh)', template='plotly_white', hovermode="x unified")
-            fig_precios.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
-            fig_precios.update_yaxes(title_text="Precio (€/MWh)", secondary_y=False)
-            fig_precios.update_yaxes(title_text="Diferencia (€/MWh)", secondary_y=True, showgrid=False)
+                
+            fig_energia.update_layout(title_text='Evolución de Energía y Diferencial de Precio', template='plotly_white', hovermode="x unified")
+            fig_energia.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
+            fig_energia.update_yaxes(title_text="Energía (MWh)", secondary_y=False)
+            fig_energia.update_yaxes(title_text="Diferencial de Precio (€/MWh)", secondary_y=True, showgrid=False)
             
-            if perfil_24h: 
-                fig_precios.update_xaxes(tickmode='linear', dtick=1)
-                
-            st.plotly_chart(fig_precios, use_container_width=True)
-
-        st.markdown("---")
-
-        # --- GRÁFICO 2: ENERGÍA ---
-        if dfs_energia:
-            df_final_energia = pd.concat(dfs_energia, ignore_index=True)
-            if perfil_24h:
-                df_final_energia = agrupar_datos(df_final_energia, 'h', 'energia')
-                df_final_energia = generar_perfil(df_final_energia)
-            else:
-                df_final_energia = agrupar_datos(df_final_energia, freq, 'energia')
-                
-            lista_dfs_agrupados.append(df_final_energia)
-            fig_energia = px.line(df_final_energia, x=x_col, y='value', color='Indicador', title='Evolución de Energía (MWh)', template='plotly_white')
             if perfil_24h: fig_energia.update_xaxes(tickmode='linear', dtick=1)
             st.plotly_chart(fig_energia, use_container_width=True)
-        
+
         st.markdown("---")
         
         # --- GRÁFICO 3: SECUNDARIA ---
-        if dfs_secundaria:
-            df_final_secundaria = pd.concat(dfs_secundaria, ignore_index=True)
-            if perfil_24h:
-                df_final_secundaria = agrupar_datos(df_final_secundaria, 'h', 'precio')
-                df_final_secundaria = generar_perfil(df_final_secundaria)
-            else:
-                df_final_secundaria = agrupar_datos(df_final_secundaria, freq, 'precio')
-                
-            lista_dfs_agrupados.append(df_final_secundaria)
+        if df_final_secundaria is not None:
             fig_secundaria = make_subplots(specs=[[{"secondary_y": True}]])
             
             for indicador in df_final_secundaria['Indicador'].unique():
@@ -258,7 +301,7 @@ def pagina_ajustes(start_date, end_date):
                 es_banda = "banda" in indicador.lower() 
                 fig_secundaria.add_trace(go.Scatter(x=df_filtro[x_col], y=df_filtro['value'], name=indicador, mode='lines'), secondary_y=es_banda)
 
-            fig_secundaria.update_layout(title_text='Precios Banda y Energía Secundaria', template='plotly_white')
+            fig_secundaria.update_layout(title_text='Precios Banda y Energía Secundaria', template='plotly_white', hovermode="x unified")
             fig_secundaria.update_yaxes(title_text="Precio Energía (€/MWh)", secondary_y=False)
             fig_secundaria.update_yaxes(title_text="Precio Banda (€/MW)", secondary_y=True, showgrid=False)
             if perfil_24h: fig_secundaria.update_xaxes(tickmode='linear', dtick=1)
