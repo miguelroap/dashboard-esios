@@ -20,7 +20,7 @@ st.title("⚡ Dashboard Analítico de Mercado (ESIOS)")
 st.sidebar.header("Navegación")
 seccion = st.sidebar.radio(
     "Selecciona el módulo:",
-    ("Mercados de Ajuste", "Precios de Captura Renovables", "Producción vs Estimación", "Mercados Intradiarios")
+    ("Mercados de Ajuste", "Precios de Captura Renovables", "Producción por Tecnología", "Mercados Intradiarios")
 )
 
 st.sidebar.markdown("---")
@@ -50,6 +50,22 @@ indicadores_secundaria = {
     "634": "Precio banda secundaria bajar (€/MW)",
     "682": "Precio energía secundaria subir (€/MWh)",
     "683": "Precio energía secundaria bajar (€/MWh)"
+}
+
+indicadores_tecnologia = {
+    "547": "Carbón",
+    "550": "Ciclo Combinado",
+    "1297": "Cogeneración y resto",
+    "1295": "Solar Fotovoltaica",
+    "1294": "Solar Térmica",
+    "1296": "Térmica Renovable",
+    "2344": "Turbina vapor",
+    "2078": "Consumo bombeo",
+    "551": "Eólica",
+    "2080": "Hidráulica",
+    "549": "Nuclear",
+    "2077": "Importación total",
+    "2072": "Exportación total"
 }
 
 # --- FUNCIONES AUXILIARES ---
@@ -87,7 +103,7 @@ def obtener_datos_simples(indicator_id, nombre_indicador, start_date, end_date):
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def obtener_datos_batched(indicator_id, start_dt, end_dt, specific_geo):
+def obtener_datos_batched(indicator_id, nombre_indicador, start_dt, end_dt, specific_geo):
     all_chunks = []
     current_date = start_dt
     while current_date <= end_dt:
@@ -117,8 +133,9 @@ def obtener_datos_batched(indicator_id, start_dt, end_dt, specific_geo):
         return pd.DataFrame()
     df_total = pd.concat(all_chunks).drop_duplicates(subset='datetime')
     df_total['datetime'] = df_total['datetime'].dt.tz_convert('Europe/Madrid').dt.tz_localize(None)
-    df_total = df_total.set_index('datetime').sort_index()
-    return df_total[['value']]
+    df_total['Indicador'] = nombre_indicador
+    df_total = df_total.sort_values(by='datetime').reset_index(drop=True)
+    return df_total[['datetime', 'value', 'Indicador']]
 
 # --- FUNCIONES DE PROCESAMIENTO ---
 def agrupar_datos(df, frecuencia, tipo):
@@ -129,11 +146,11 @@ def agrupar_datos(df, frecuencia, tipo):
 def generar_perfil(df):
     if df.empty: return df
     df_local = df.copy()
-    df_local['Hora'] = df_local['datetime'].dt.hour
+    if 'datetime' in df_local.columns:
+        df_local['Hora'] = df_local['datetime'].dt.hour
     return df_local.groupby(['Hora', 'Indicador'])['value'].mean().reset_index()
 
 def asegurar_continuidad(df, freq, x_col='datetime'):
-    """Inyecta NaNs explícitos en los huecos temporales para que Plotly corte la línea"""
     if df.empty or x_col != 'datetime': return df
     dfs = []
     for ind in df['Indicador'].unique():
@@ -175,7 +192,10 @@ def pagina_ajustes(start_date, end_date):
         dfs_secundaria = [obtener_datos_simples(i, n, start_date, end_date) for i, n in indicadores_secundaria.items()]
         dfs_secundaria = [df for df in dfs_secundaria if not df.empty]
         
-        # --- CÁLCULO FÍSICO Y GRÁFICO DE BARRAS DEL BENEFICIO ---
+        # --- CÁLCULO FÍSICO DEL BENEFICIO (Se dibuja al final) ---
+        fig_ben = None
+        df_beneficio_final = None
+        
         if dfs_precios and dfs_energia:
             df_p_raw = pd.concat(dfs_precios, ignore_index=True)
             df_e_raw = pd.concat(dfs_energia, ignore_index=True)
@@ -194,33 +214,21 @@ def pagina_ajustes(start_date, end_date):
                 beneficio_horario = (df_p_pivot_exacto[ind_d] - df_p_pivot_exacto[ind_rt]) * df_e_pivot_exacto[ind_e]
                 beneficio_diario = beneficio_horario.resample('D').sum()
                 
-                df_beneficio = pd.DataFrame({'Beneficio': beneficio_diario})
-                df_beneficio.index = df_beneficio.index.strftime('%Y-%m-%d')
+                df_beneficio_final = pd.DataFrame({'Beneficio': beneficio_diario})
+                df_beneficio_final.index = df_beneficio_final.index.strftime('%Y-%m-%d')
+                df_beneficio_final.index.name = 'Fecha'
+                df_beneficio_final['Texto_Format'] = df_beneficio_final['Beneficio'].apply(lambda x: f"{formato_europeo(x)} €")
+                df_beneficio_final = df_beneficio_final.reset_index()
                 
-                # CORRECCIÓN AQUÍ: Le damos un nombre explícito al índice para que Plotly lo encuentre
-                df_beneficio.index.name = 'Fecha'
-                
-                # Generar etiqueta de texto para la gráfica
-                df_beneficio['Texto_Format'] = df_beneficio['Beneficio'].apply(lambda x: f"{formato_europeo(x)} €")
-                
-                # Reseteamos el índice para poder usar la columna 'Fecha' en X
-                df_beneficio = df_beneficio.reset_index()
-                
-                # Gráfico de columnas compacto
                 fig_ben = px.bar(
-                    df_beneficio, x='Fecha', y='Beneficio', text='Texto_Format',
+                    df_beneficio_final, x='Fecha', y='Beneficio', text='Texto_Format',
                     title='💰 Potencial Beneficio RT Fase 2 a Bajar (Agregado Diario)',
                     template='plotly_white', height=350
                 )
-                fig_ben.update_traces(textposition='outside', marker_color='#2ca02c') # Verde beneficio
+                fig_ben.update_traces(textposition='outside', marker_color='#2ca02c') 
                 fig_ben.update_layout(margin=dict(t=40, b=20), xaxis_title='', yaxis_title='Beneficio (€)')
-                
-                # Subimos el tope un 15% por arriba para que quepa el texto (el número en formato europeo)
-                if not df_beneficio.empty and df_beneficio['Beneficio'].max() > 0:
-                    fig_ben.update_yaxes(range=[0, df_beneficio['Beneficio'].max() * 1.15]) 
-                
-                st.plotly_chart(fig_ben, use_container_width=True)
-                st.markdown("---")
+                if not df_beneficio_final.empty and df_beneficio_final['Beneficio'].max() > 0:
+                    fig_ben.update_yaxes(range=[0, df_beneficio_final['Beneficio'].max() * 1.15]) 
 
         # --- PREPARACIÓN DE GRÁFICOS RESTANTES ---
         lista_dfs_agrupados = []
@@ -263,15 +271,17 @@ def pagina_ajustes(start_date, end_date):
             if "Precio mercado diario España" in df_pivot_precios.columns and "Precio restricciones técnicas fase 2" in df_pivot_precios.columns:
                 spread_grafico = df_pivot_precios["Precio mercado diario España"] - df_pivot_precios["Precio restricciones técnicas fase 2"]
 
+        # --- GRÁFICO 1: PRECIOS ---
         if df_final_precios is not None:
             fig_precios = px.line(df_final_precios, x=x_col, y='value', color='Indicador', title='Evolución de Precios (€/MWh)', template='plotly_white', markers=True if perfil_24h or (freq and freq != 'h') else False)
-            fig_precios.update_traces(connectgaps=False) # Cortar líneas sin datos
+            fig_precios.update_traces(connectgaps=False) 
             fig_precios.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
             fig_precios.update_yaxes(title_text='Precio (€/MWh)')
             if perfil_24h: fig_precios.update_xaxes(tickmode='linear', dtick=1)
             st.plotly_chart(fig_precios, use_container_width=True)
             st.markdown("---")
 
+        # --- GRÁFICO 2: ENERGÍA ---
         if df_final_energia is not None:
             fig_energia = make_subplots(specs=[[{"secondary_y": True}]])
             colores = px.colors.qualitative.Plotly
@@ -289,6 +299,7 @@ def pagina_ajustes(start_date, end_date):
             st.plotly_chart(fig_energia, use_container_width=True)
             st.markdown("---")
         
+        # --- GRÁFICO 3: SECUNDARIA ---
         if df_final_secundaria is not None:
             fig_secundaria = make_subplots(specs=[[{"secondary_y": True}]])
             for indicador in df_final_secundaria['Indicador'].unique():
@@ -300,6 +311,21 @@ def pagina_ajustes(start_date, end_date):
             fig_secundaria.update_yaxes(title_text="Precio Banda (€/MW)", secondary_y=True, showgrid=False)
             if perfil_24h: fig_secundaria.update_xaxes(tickmode='linear', dtick=1)
             st.plotly_chart(fig_secundaria, use_container_width=True)
+            st.markdown("---")
+
+        # --- DIBUJAR GRÁFICO BENEFICIOS AL FINAL ---
+        if fig_ben is not None:
+            st.plotly_chart(fig_ben, use_container_width=True)
+            st.markdown("---")
+
+        if lista_dfs_agrupados:
+            st.subheader("📑 Tabla Consolidada")
+            df_total = pd.concat(lista_dfs_agrupados, ignore_index=True)
+            df_pivot = df_total.pivot_table(index=x_col, columns='Indicador', values='value', aggfunc='first').reset_index()
+            df_pivot = df_pivot.sort_values(by=x_col).reset_index(drop=True)
+            if not perfil_24h:
+                df_pivot[x_col] = df_pivot[x_col].dt.strftime('%Y-%m-%d %H:%M')
+            st.dataframe(df_pivot, use_container_width=True)
 
 # ==============================================================================
 # PÁGINA 2: PRECIOS DE CAPTURA RENOVABLES
@@ -311,19 +337,18 @@ def pagina_renovables(start_date, end_date):
     
     if st.button("🚀 Iniciar Cálculo Analítico"):
         with st.spinner("Descargando e integrando datos históricos..."):
-            df_precio = obtener_datos_batched(600, start_dt, end_dt, 3)
-            df_eolica = obtener_datos_batched(551, start_dt, end_dt, 8741)
-            df_solar = obtener_datos_batched(1295, start_dt, end_dt, 8741)
+            df_precio = obtener_datos_batched(600, "Precio mercado diario España", start_dt, end_dt, 3)
+            df_eolica = obtener_datos_batched(551, "Eólica", start_dt, end_dt, 8741)
+            df_solar = obtener_datos_batched(1295, "Solar", start_dt, end_dt, 8741)
             
             if df_precio.empty or df_eolica.empty or df_solar.empty:
                 st.error("Error: Faltan datos para procesar el periodo.")
                 return
 
-            df_precio_h = df_precio.resample('1h').mean().rename(columns={'value': 'Precio_Spot'})
-            df_eolica_h = df_eolica.resample('1h').mean().rename(columns={'value': 'Gen_Eolica'})
-            df_solar_h = df_solar.resample('1h').mean().rename(columns={'value': 'Gen_Solar'})
+            df_precio_h = df_precio.set_index('datetime').resample('1h').mean().rename(columns={'value': 'Precio_Spot'})
+            df_eolica_h = df_eolica.set_index('datetime').resample('1h').mean().rename(columns={'value': 'Gen_Eolica'})
+            df_solar_h = df_solar.set_index('datetime').resample('1h').mean().rename(columns={'value': 'Gen_Solar'})
             
-            # Usamos outer para no descartar huecos, así se cortará la línea visualmente
             df_master = df_precio_h.join(df_eolica_h, how='outer').join(df_solar_h, how='outer')
             
             precio_medio_spot = df_master['Precio_Spot'].mean()
@@ -348,41 +373,110 @@ def pagina_renovables(start_date, end_date):
             st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# PÁGINA 3: PRODUCCIÓN VS ESTIMACIÓN
+# PÁGINA 3: PRODUCCIÓN POR TECNOLOGÍA (NUEVA)
 # ==============================================================================
-def pagina_estimaciones(start_date, end_date):
-    st.subheader("🔮 Producción Renovable: Real vs Estimación")
+def pagina_tecnologia(start_date, end_date):
+    st.subheader("🏭 Producción de Energía por Tecnología")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        agrupacion = st.selectbox("Agrupación temporal para gráficos:", ("Cuartohorario", "Horario", "Diario", "Mensual", "Anual"), key="tec_agrup")
+    with col2:
+        st.write(""); st.write("")
+        perfil_24h = st.checkbox("Activar Perfil Medio 24h", value=False, key="tec_perfil")
+
+    frecuencias = {"Cuartohorario": None, "Horario": "h", "Diario": "D", "Mensual": "MS", "Anual": "YS"}
+    freq = frecuencias[agrupacion]
+    x_col = 'Hora' if perfil_24h else 'datetime'
+    
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
     
-    with st.spinner("Descargando series reales y previsiones..."):
-        df_eol_real = obtener_datos_batched(551, start_dt, end_dt, 8741)
-        df_sol_real = obtener_datos_batched(1295, start_dt, end_dt, 8741)
-        df_eol_est = obtener_datos_batched(1777, start_dt, end_dt, 8741)
-        df_sol_est = obtener_datos_batched(1779, start_dt, end_dt, 8741)
-        
-        max_dt_eol = df_eol_real.index.max() if not df_eol_real.empty else start_dt
-        max_dt_sol = df_sol_real.index.max() if not df_sol_real.empty else start_dt
-        
-        df_eol_est_futuro = df_eol_est[df_eol_est.index > max_dt_eol] if not df_eol_est.empty else pd.DataFrame()
-        df_sol_est_futuro = df_sol_est[df_sol_est.index > max_dt_sol] if not df_sol_est.empty else pd.DataFrame()
-        
-        if not df_eol_real.empty and not df_eol_est_futuro.empty: df_eol_est_futuro = pd.concat([df_eol_real.iloc[[-1]], df_eol_est_futuro])
-        if not df_sol_real.empty and not df_sol_est_futuro.empty: df_sol_est_futuro = pd.concat([df_sol_real.iloc[[-1]], df_sol_est_futuro])
+    with st.spinner("Descargando datos del mix de generación... (Puede tardar unos segundos)"):
+        dfs = []
+        for ind_id, nombre in indicadores_tecnologia.items():
+            df_temp = obtener_datos_batched(ind_id, nombre, start_dt, end_dt, 8741)
+            if not df_temp.empty:
+                dfs.append(df_temp)
+                
+        if not dfs:
+            st.warning("No hay datos disponibles para el periodo seleccionado.")
+            return
+            
+        df_raw = pd.concat(dfs, ignore_index=True)
 
-        def formatear(df, nombre_indicador):
-            if df.empty: return pd.DataFrame()
-            df_temp = df.reset_index()
-            df_temp['Indicador'] = nombre_indicador
-            return df_temp
-
-        df_plot = pd.concat([formatear(df_eol_real, 'Eólica (Real)'), formatear(df_eol_est_futuro, 'Eólica (Estimación)'), formatear(df_sol_real, 'Solar Fotovoltaica (Real)'), formatear(df_sol_est_futuro, 'Solar Fotovoltaica (Estimación)')])
+        # 1. Convertir Potencia (MW) a Energía Horaria (MWh) haciendo la media en bloques de 1 hora
+        df_h = df_raw.groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].mean().reset_index()
         
-        if not df_plot.empty:
-            df_plot = asegurar_continuidad(df_plot, "15min", "datetime")
-            fig = px.line(df_plot, x='datetime', y='value', color='Indicador', title="Evolución y Previsión de Energías Renovables (MWh)", color_discrete_map={'Eólica (Real)': 'green', 'Eólica (Estimación)': 'green', 'Solar Fotovoltaica (Real)': 'orange', 'Solar Fotovoltaica (Estimación)': 'orange'}, line_dash='Indicador', line_dash_map={'Eólica (Real)': 'solid', 'Eólica (Estimación)': 'dash', 'Solar Fotovoltaica (Real)': 'solid', 'Solar Fotovoltaica (Estimación)': 'dash'}, template='plotly_white')
-            fig.update_traces(connectgaps=False)
-            st.plotly_chart(fig, use_container_width=True)
+        # 2. Aplicar la agrupación seleccionada por el usuario
+        if perfil_24h:
+            df_plot = generar_perfil(df_h)
+        else:
+            if agrupacion == "Cuartohorario":
+                df_plot = df_raw 
+            elif agrupacion == "Horario":
+                df_plot = df_h
+            else:
+                # Para diario, mensual, anual SUMAMOS la energía MWh
+                df_plot = agrupar_datos(df_h, freq, 'energia')
+                
+        # Alineamos índices y rellenamos nulos con 0 para que los gráficos de áreas apiladas funcionen bien
+        df_pivot = df_plot.pivot_table(index=x_col, columns='Indicador', values='value').fillna(0)
+        df_plot_aligned = df_pivot.reset_index().melt(id_vars=x_col, value_name='value')
+
+        # --- GRÁFICO 1: PRODUCCIÓN ABSOLUTA ---
+        fig1 = px.area(df_plot_aligned, x=x_col, y='value', color='Indicador', title="Producción por Tecnología (MWh)", template='plotly_white')
+        fig1.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
+        fig1.update_yaxes(title_text='Generación (MWh)')
+        if perfil_24h: fig1.update_xaxes(tickmode='linear', dtick=1)
+        st.plotly_chart(fig1, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # --- GRÁFICO 2: PORCENTUAL (0-100%) ---
+        # Filtramos valores negativos (bombeo, exportaciones) para no distorsionar el 100% de la generación
+        df_pct = df_plot_aligned[df_plot_aligned['value'] > 0].copy()
+        totales = df_pct.groupby(x_col)['value'].transform('sum')
+        df_pct['Porcentaje'] = (df_pct['value'] / totales) * 100
+        
+        fig2 = px.area(df_pct, x=x_col, y='Porcentaje', color='Indicador', title="Mix de Generación (0-100%)", template='plotly_white')
+        fig2.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
+        fig2.update_yaxes(title_text='Porcentaje (%)', range=[0, 100])
+        if perfil_24h: fig2.update_xaxes(tickmode='linear', dtick=1)
+        st.plotly_chart(fig2, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- GRÁFICO 3: RENOVABLE VS NO RENOVABLE ---
+        renovables = ["Solar Fotovoltaica", "Solar Térmica", "Térmica Renovable", "Eólica", "Hidráulica"]
+        no_renovables = ["Carbón", "Ciclo Combinado", "Cogeneración y resto", "Turbina vapor", "Nuclear"]
+        
+        def clasificar_tecnologia(ind):
+            if ind in renovables: return "Renovable"
+            elif ind in no_renovables: return "No Renovable"
+            else: return "Otros" # Interconexiones y bombeo
+            
+        df_tipo = df_plot_aligned.copy()
+        df_tipo['Tipo'] = df_tipo['Indicador'].apply(clasificar_tecnologia)
+        
+        # Filtramos "Otros" e ingresos negativos para ver solo el mix de generación puro
+        df_tipo = df_tipo[(df_tipo['Tipo'] != "Otros") & (df_tipo['value'] > 0)]
+        df_tipo = df_tipo.groupby([x_col, 'Tipo'])['value'].sum().reset_index()
+        
+        totales_tipo = df_tipo.groupby(x_col)['value'].transform('sum')
+        df_tipo['Porcentaje'] = (df_tipo['value'] / totales_tipo) * 100
+        
+        fig3 = px.area(
+            df_tipo, x=x_col, y='Porcentaje', color='Tipo', 
+            title="Generación Renovable vs No Renovable (0-100%)", 
+            color_discrete_map={"Renovable": "#2ca02c", "No Renovable": "#7f7f7f"},
+            template='plotly_white'
+        )
+        fig3.update_xaxes(title_text='Hora del día' if perfil_24h else 'Fecha')
+        fig3.update_yaxes(title_text='Porcentaje (%)', range=[0, 100])
+        if perfil_24h: fig3.update_xaxes(tickmode='linear', dtick=1)
+        st.plotly_chart(fig3, use_container_width=True)
+
 
 # ==============================================================================
 # PÁGINA 4: MERCADOS INTRADIARIOS
@@ -431,7 +525,6 @@ def pagina_intradiarios(start_date, end_date):
         df_final = pd.concat(dfs, ignore_index=True)
 
         if perfil_24h:
-            # Para el perfil horario agregamos por hora primero
             df_plot_top = agrupar_datos(df_final, 'h', 'precio')
             df_plot_top = generar_perfil(df_plot_top)
         else:
@@ -452,7 +545,6 @@ def pagina_intradiarios(start_date, end_date):
 
         st.markdown("---")
 
-        # --- CÁLCULO DE SPREADS ALINEADOS A LA AGRUPACIÓN SELECCIONADA ---
         df_pivot = df_plot_top.pivot_table(index=x_col, columns='Indicador', values='value')
         diario = "Precio mercado diario España"
         spreads = pd.DataFrame(index=df_pivot.index)
@@ -491,8 +583,8 @@ if TOKEN_ESIOS and TOKEN_ESIOS != "TU_TOKEN_AQUI" and len(fechas) == 2:
         pagina_ajustes(start_date, end_date)
     elif seccion == "Precios de Captura Renovables":
         pagina_renovables(start_date, end_date)
-    elif seccion == "Producción vs Estimación":
-        pagina_estimaciones(start_date, end_date)
+    elif seccion == "Producción por Tecnología":
+        pagina_tecnologia(start_date, end_date)
     elif seccion == "Mercados Intradiarios":
         pagina_intradiarios(start_date, end_date)
 else:
