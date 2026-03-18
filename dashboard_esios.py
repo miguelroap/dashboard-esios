@@ -177,44 +177,50 @@ def pagina_ajustes(start_date, end_date):
         
         # --- CÁLCULO FÍSICO Y GRÁFICO DE BARRAS DEL BENEFICIO ---
         if dfs_precios and dfs_energia:
-            try:
-                df_p_raw = pd.concat(dfs_precios, ignore_index=True)
-                df_e_raw = pd.concat(dfs_energia, ignore_index=True)
+            df_p_raw = pd.concat(dfs_precios, ignore_index=True)
+            df_e_raw = pd.concat(dfs_energia, ignore_index=True)
+            
+            df_p_h = df_p_raw[df_p_raw['Indicador'].isin(["Precio mercado diario España", "Precio restricciones técnicas fase 2"])].groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].mean().reset_index()
+            df_e_h = df_e_raw[df_e_raw['Indicador'] == "Energía casada RT fase 2 a bajar"].groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].sum().reset_index()
+            
+            df_p_pivot_exacto = df_p_h.pivot_table(index='datetime', columns='Indicador', values='value')
+            df_e_pivot_exacto = df_e_h.pivot_table(index='datetime', columns='Indicador', values='value')
+            
+            ind_d = "Precio mercado diario España"
+            ind_rt = "Precio restricciones técnicas fase 2"
+            ind_e = "Energía casada RT fase 2 a bajar"
+            
+            if ind_d in df_p_pivot_exacto.columns and ind_rt in df_p_pivot_exacto.columns and ind_e in df_e_pivot_exacto.columns:
+                beneficio_horario = (df_p_pivot_exacto[ind_d] - df_p_pivot_exacto[ind_rt]) * df_e_pivot_exacto[ind_e]
+                beneficio_diario = beneficio_horario.resample('D').sum()
                 
-                df_p_h = df_p_raw[df_p_raw['Indicador'].isin(["Precio mercado diario España", "Precio restricciones técnicas fase 2"])].groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].mean().reset_index()
-                df_e_h = df_e_raw[df_e_raw['Indicador'] == "Energía casada RT fase 2 a bajar"].groupby([pd.Grouper(key='datetime', freq='h'), 'Indicador'])['value'].sum().reset_index()
+                df_beneficio = pd.DataFrame({'Beneficio': beneficio_diario})
+                df_beneficio.index = df_beneficio.index.strftime('%Y-%m-%d')
                 
-                df_p_pivot_exacto = df_p_h.pivot_table(index='datetime', columns='Indicador', values='value')
-                df_e_pivot_exacto = df_e_h.pivot_table(index='datetime', columns='Indicador', values='value')
+                # CORRECCIÓN AQUÍ: Le damos un nombre explícito al índice para que Plotly lo encuentre
+                df_beneficio.index.name = 'Fecha'
                 
-                ind_d = "Precio mercado diario España"
-                ind_rt = "Precio restricciones técnicas fase 2"
-                ind_e = "Energía casada RT fase 2 a bajar"
+                # Generar etiqueta de texto para la gráfica
+                df_beneficio['Texto_Format'] = df_beneficio['Beneficio'].apply(lambda x: f"{formato_europeo(x)} €")
                 
-                if ind_d in df_p_pivot_exacto.columns and ind_rt in df_p_pivot_exacto.columns and ind_e in df_e_pivot_exacto.columns:
-                    beneficio_horario = (df_p_pivot_exacto[ind_d] - df_p_pivot_exacto[ind_rt]) * df_e_pivot_exacto[ind_e]
-                    beneficio_diario = beneficio_horario.resample('D').sum()
-                    
-                    df_beneficio = pd.DataFrame({'Beneficio': beneficio_diario})
-                    df_beneficio.index = df_beneficio.index.strftime('%Y-%m-%d')
-                    
-                    # Generar etiqueta de texto para la gráfica
-                    df_beneficio['Texto_Format'] = df_beneficio['Beneficio'].apply(lambda x: f"{formato_europeo(x)} €")
-                    
-                    # Gráfico de columnas compacto en lugar de tabla
-                    fig_ben = px.bar(
-                        df_beneficio.reset_index(), x='index', y='Beneficio', text='Texto_Format',
-                        title='💰 Potencial Beneficio RT Fase 2 a Bajar (Agregado Diario)',
-                        template='plotly_white', height=300
-                    )
-                    fig_ben.update_traces(textposition='outside', marker_color='#2ca02c') # Verde beneficio
-                    fig_ben.update_layout(margin=dict(t=40, b=20), xaxis_title='', yaxis_title='Beneficio (€)')
-                    # Asegurar que no se corte el texto de arriba extendiendo el rango Y
-                    fig_ben.update_yaxes(range=[0, df_beneficio['Beneficio'].max() * 1.2]) 
-                    st.plotly_chart(fig_ben, use_container_width=True)
-                    st.markdown("---")
-            except Exception:
-                pass 
+                # Reseteamos el índice para poder usar la columna 'Fecha' en X
+                df_beneficio = df_beneficio.reset_index()
+                
+                # Gráfico de columnas compacto
+                fig_ben = px.bar(
+                    df_beneficio, x='Fecha', y='Beneficio', text='Texto_Format',
+                    title='💰 Potencial Beneficio RT Fase 2 a Bajar (Agregado Diario)',
+                    template='plotly_white', height=350
+                )
+                fig_ben.update_traces(textposition='outside', marker_color='#2ca02c') # Verde beneficio
+                fig_ben.update_layout(margin=dict(t=40, b=20), xaxis_title='', yaxis_title='Beneficio (€)')
+                
+                # Subimos el tope un 15% por arriba para que quepa el texto (el número en formato europeo)
+                if not df_beneficio.empty and df_beneficio['Beneficio'].max() > 0:
+                    fig_ben.update_yaxes(range=[0, df_beneficio['Beneficio'].max() * 1.15]) 
+                
+                st.plotly_chart(fig_ben, use_container_width=True)
+                st.markdown("---")
 
         # --- PREPARACIÓN DE GRÁFICOS RESTANTES ---
         lista_dfs_agrupados = []
