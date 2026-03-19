@@ -345,9 +345,9 @@ def pagina_renovables(start_date, end_date):
                 st.error("Error: Faltan datos para procesar el periodo.")
                 return
 
-            df_precio_h = df_precio.set_index('datetime').resample('1h').mean().rename(columns={'value': 'Precio_Spot'})
-            df_eolica_h = df_eolica.set_index('datetime').resample('1h').mean().rename(columns={'value': 'Gen_Eolica'})
-            df_solar_h = df_solar.set_index('datetime').resample('1h').mean().rename(columns={'value': 'Gen_Solar'})
+            df_precio_h = df_precio.set_index('datetime')[['value']].resample('1h').mean().rename(columns={'value': 'Precio_Spot'})
+            df_eolica_h = df_eolica.set_index('datetime')[['value']].resample('1h').mean().rename(columns={'value': 'Gen_Eolica'})
+            df_solar_h = df_solar.set_index('datetime')[['value']].resample('1h').mean().rename(columns={'value': 'Gen_Solar'})
             
             df_master = df_precio_h.join(df_eolica_h, how='outer').join(df_solar_h, how='outer')
             
